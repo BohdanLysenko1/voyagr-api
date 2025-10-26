@@ -3,6 +3,7 @@ import calendarRoutes from './calendarRoutes';
 import dealsRoutes from './dealsRoutes';
 import favoritesRoutes from './favoritesRoutes';
 import aiRoutes from './aiRoutes';
+import flightRoutes from './flightRoutes';
 
 const router = Router();
 
@@ -21,5 +22,6 @@ router.use('/calendar', calendarRoutes);
 router.use('/deals', dealsRoutes);
 router.use('/favorites', favoritesRoutes);
 router.use('/ai', aiRoutes);
+router.use('/flights', flightRoutes);
 
 export default router;

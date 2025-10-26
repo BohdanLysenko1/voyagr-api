@@ -124,6 +124,13 @@ export interface PaginatedResponse<T> {
 
 // AI Types
 export interface AITripRequest {
+  origin?: string; // User's origin location (city/airport)
+  originLocation?: {
+    city?: string;
+    country?: string;
+    latitude?: number;
+    longitude?: number;
+  };
   destination?: string;
   dates?: {
     start: string;
@@ -137,4 +144,42 @@ export interface AITripRequest {
     travelStyle?: string;
   };
   message: string;
+}
+
+// Flight Search Types
+export interface FlightPrice {
+  amount: number;
+  currency: string;
+}
+
+export interface FlightOffer {
+  id: string;
+  airline: string;
+  flightNumber: string;
+  origin: string;
+  destination: string;
+  departureTime: string;
+  arrivalTime: string;
+  departureDate: string;
+  arrivalDate: string;
+  price: FlightPrice;
+  stops: number;
+  duration: string;
+  class?: string; // Cabin class (ECONOMY, BUSINESS, etc.)
+  availableSeats?: number; // Number of bookable seats
+}
+
+export interface FlightSearchResponse {
+  message: string;
+  flights: FlightOffer[];
+  interactive?: {
+    type: 'flight-results';
+    flights: FlightOffer[];
+  };
+  metadata: {
+    model: string;
+    userId: string;
+    timestamp: string;
+    function_call?: string;
+  };
 }
