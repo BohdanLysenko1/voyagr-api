@@ -3,7 +3,6 @@ import { AuthRequest, AITripRequest, FlightOffer } from '../models/types';
 import { HTTP_STATUS } from '../config/constants';
 import { AppError } from '../middleware/errorHandler';
 import { generateTravelChatResponse } from '../config/genkitFlows';
-import { amadeus, isAmadeusConfigured } from '../config/amadeus';
 
 /**
  * AI Trip Planning endpoint
@@ -304,131 +303,20 @@ export const chat = async (req: AuthRequest, res: Response): Promise<void> => {
       if (aiResponse.function === 'search_flights') {
         console.log('🛫 AI requested flight search:', aiResponse.parameters);
 
-        // Check if Amadeus is configured
-        if (!isAmadeusConfigured()) {
-          res.status(HTTP_STATUS.OK).json({
-            success: true,
-            data: {
-              message: "I'd love to search for flights for you, but the flight search service isn't configured yet. Please ask your administrator to add Amadeus API credentials.",
-              metadata: {
-                model: 'gemini-2.5-flash',
-                userId: userId || 'anonymous',
-                timestamp: new Date().toISOString(),
-              },
+        // Flight search service is not available
+        res.status(HTTP_STATUS.OK).json({
+          success: true,
+          data: {
+            message: "I'd love to search for flights for you, but the flight search service isn't currently available. Please try using a dedicated flight booking service.",
+            metadata: {
+              model: 'gemini-2.5-flash',
+              userId: userId || 'anonymous',
+              timestamp: new Date().toISOString(),
             },
-            message: 'Chat response generated successfully',
-          });
-          return;
-        }
-
-        try {
-          // Search for flights using Amadeus
-          const flightParams: {
-            originLocationCode: any;
-            destinationLocationCode: any;
-            departureDate: any;
-            adults: any;
-            max: number;
-            returnDate?: any;
-          } = {
-            originLocationCode: aiResponse.parameters.origin,
-            destinationLocationCode: aiResponse.parameters.destination,
-            departureDate: aiResponse.parameters.departureDate,
-            adults: aiResponse.parameters.adults || 1,
-            max: 5,
-          };
-
-          if (aiResponse.parameters.returnDate) {
-            flightParams.returnDate = aiResponse.parameters.returnDate;
-          }
-
-          const flightResponse = await amadeus().shopping.flightOffersSearch.get(flightParams);
-
-          // Format flights for display with proper typing
-          const flights: FlightOffer[] = flightResponse.data.slice(0, 5).map((offer: any) => {
-            const outbound = offer.itineraries[0];
-            const firstSegment = outbound.segments[0];
-            const lastSegment = outbound.segments[outbound.segments.length - 1];
-
-            // Calculate duration in a more robust way
-            const durationString = outbound.duration 
-              ? parseDuration(outbound.duration) 
-              : 'N/A';
-
-            // Extract cabin class from traveler pricings
-            const cabinClass = offer.travelerPricings?.[0]?.fareDetailsBySegment?.[0]?.cabin || 'ECONOMY';
-            
-            // Get available seats
-            const availableSeats = offer.numberOfBookableSeats || null;
-
-            // Parse departure and arrival dates
-            const departureDateTime = new Date(firstSegment.departure.at);
-            const arrivalDateTime = new Date(lastSegment.arrival.at);
-
-            return {
-              id: offer.id,
-              airline: firstSegment.carrierCode,
-              flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
-              origin: firstSegment.departure.iataCode,
-              destination: lastSegment.arrival.iataCode,
-              departureTime: departureDateTime.toLocaleTimeString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: false
-              }),
-              arrivalTime: arrivalDateTime.toLocaleTimeString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: false
-              }),
-              departureDate: departureDateTime.toISOString().split('T')[0],
-              arrivalDate: arrivalDateTime.toISOString().split('T')[0],
-              price: {
-                amount: parseFloat(offer.price.total) || 0,
-                currency: offer.price.currency || 'USD',
-              },
-              stops: outbound.segments.length - 1,
-              duration: durationString,
-              class: cabinClass,
-              availableSeats: availableSeats,
-            };
-          });
-
-          res.status(HTTP_STATUS.OK).json({
-            success: true,
-            data: {
-              message: `Great! I found ${flights.length} flights from ${aiResponse.parameters.origin} to ${aiResponse.parameters.destination}. Here are the best options:`,
-              flights,
-              interactive: {
-                type: 'flight-results',
-                flights,
-              },
-              metadata: {
-                model: 'gemini-2.5-flash',
-                userId: userId || 'anonymous',
-                timestamp: new Date().toISOString(),
-                function_call: 'search_flights',
-              },
-            },
-            message: 'Flight search completed successfully',
-          });
-          return;
-        } catch (flightError: any) {
-          console.error('❌ Error searching flights:', flightError);
-          res.status(HTTP_STATUS.OK).json({
-            success: true,
-            data: {
-              message: `I encountered an issue while searching for flights: ${flightError.message}. Please check that the airport codes and dates are correct, or try again.`,
-              metadata: {
-                model: 'gemini-2.5-flash',
-                userId: userId || 'anonymous',
-                timestamp: new Date().toISOString(),
-              },
-            },
-            message: 'Chat response generated successfully',
-          });
-          return;
-        }
+          },
+          message: 'Chat response generated successfully',
+        });
+        return;
       }
     }
 
