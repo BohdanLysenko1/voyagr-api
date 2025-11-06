@@ -3,6 +3,8 @@ import { AuthRequest, AITripRequest, FlightOffer } from '../models/types';
 import { HTTP_STATUS } from '../config/constants';
 import { AppError } from '../middleware/errorHandler';
 import { generateTravelChatResponse } from '../config/genkitFlows';
+import * as serpApiService from '../services/serpApiService';
+import { SerpPlaceResult, SerpFlightResult } from '../services/serpApiService';
 
 /**
  * AI Trip Planning endpoint
@@ -85,20 +87,104 @@ Example: "I want to visit Paris for 5 days in December with a budget of $3000"`,
     // STEP 3: Both origin and destination provided - generate full itinerary
     console.log(`🗺️  Planning trip from ${originCity} to ${requestData.destination}`);
 
-    // Simulate AI processing time
-    const processingDelay = Math.random() * 1000 + 500; // 500-1500ms
-    await new Promise(resolve => setTimeout(resolve, processingDelay));
+    const startTime = Date.now();
 
-    // Generate mock AI response based on the request
+    // Fetch real data from SERP API (if configured) or use fallback mocks
+    let restaurants: SerpPlaceResult[] = [];
+    let attractions: SerpPlaceResult[] = [];
+    let hotels: SerpPlaceResult[] = [];
+    let flights: SerpFlightResult[] = [];
+    let usedSerpApi = false;
+
+    if (serpApiService.isSerpApiConfigured()) {
+      console.log('🔌 SERP API configured - fetching real data');
+      usedSerpApi = true;
+
+      try {
+        // Fetch all data in parallel for better performance
+        // Each API call now includes all relevant request parameters to ensure cache keys are specific
+        const [restaurantsResult, attractionsResult, hotelsResult, flightsResult] = await Promise.allSettled([
+          serpApiService.searchRestaurants(requestData.destination, {
+            cuisine: requestData.interests?.includes('food') ? 'local' : undefined,
+            priceLevel: requestData.budget === 'budget' ? '$' : requestData.budget === 'luxury' ? '$$$' : '$$',
+            limit: 10,
+          }),
+          serpApiService.searchAttractions(requestData.destination, {
+            interests: requestData.interests || [],
+            limit: 15,
+          }),
+          serpApiService.searchHotels(requestData.destination, {
+            checkIn: requestData.dates?.start,
+            checkOut: requestData.dates?.end,
+            budget: requestData.budget === 'budget' ? 100 : requestData.budget === 'luxury' ? 500 : 200,
+            limit: 8,
+          }),
+          requestData.dates?.start
+            ? serpApiService.searchFlights(
+                getAirportCode(originCity),
+                getAirportCode(requestData.destination),
+                requestData.dates.start,
+                requestData.dates?.end,
+                {
+                  adults: requestData.travelers || 1,
+                  children: 0,
+                  cabinClass: getBudgetCabinClass(requestData.budget),
+                  limit: 8,
+                }
+              )
+            : Promise.resolve([]),
+        ]);
+
+        // Extract successful results
+        restaurants = restaurantsResult.status === 'fulfilled' ? restaurantsResult.value : [];
+        attractions = attractionsResult.status === 'fulfilled' ? attractionsResult.value : [];
+        hotels = hotelsResult.status === 'fulfilled' ? hotelsResult.value : [];
+        flights = flightsResult.status === 'fulfilled' ? flightsResult.value : [];
+
+        console.log(`✅ SERP data fetched for request:`, {
+          destination: requestData.destination,
+          interests: requestData.interests,
+          dates: requestData.dates,
+          travelers: requestData.travelers,
+          results: {
+            restaurants: restaurants.length,
+            attractions: attractions.length,
+            hotels: hotels.length,
+            flights: flights.length,
+          }
+        });
+      } catch (error) {
+        console.error('⚠️  SERP API error, falling back to mock data:', error);
+        usedSerpApi = false;
+      }
+    }
+
+    // If SERP API not configured or failed, use mock data as fallback
+    if (!usedSerpApi || (restaurants.length === 0 && attractions.length === 0)) {
+      console.log('📝 Using mock data (SERP API not configured or failed)');
+    }
+
+    const processingTime = Date.now() - startTime;
+
+    // Generate AI response based on the request and real/mock data
     const response = {
       message: generateAIResponse(requestData),
-      suggestions: generateSuggestions(requestData),
-      itinerary: generateItinerary(requestData),
+      suggestions: usedSerpApi
+        ? generateSuggestionsFromSerpData(restaurants, attractions, hotels)
+        : generateSuggestions(requestData),
+      itinerary: usedSerpApi
+        ? generateItineraryFromSerpData(requestData, attractions, restaurants)
+        : generateItinerary(requestData),
+      flights: flights.length > 0 ? flights : undefined,
+      hotels: hotels.length > 0 ? hotels : undefined,
+      restaurants: restaurants.length > 0 ? restaurants : undefined,
+      attractions: attractions.length > 0 ? attractions : undefined,
       estimatedBudget: calculateEstimatedBudget(requestData),
       origin: originCity,
       metadata: {
-        processingTime: Math.round(processingDelay),
-        model: 'voyagr-ai-v1',
+        processingTime,
+        model: usedSerpApi ? 'voyagr-ai-v1-serp' : 'voyagr-ai-v1-mock',
+        dataSource: usedSerpApi ? 'serp_api' : 'mock',
         userId: userId || 'anonymous',
         timestamp: new Date().toISOString(),
       },
@@ -224,6 +310,132 @@ function generateItinerary(request: AITripRequest): any {
 }
 
 /**
+ * Generate suggestions from real SERP data
+ */
+function generateSuggestionsFromSerpData(
+  restaurants: SerpPlaceResult[],
+  attractions: SerpPlaceResult[],
+  hotels: SerpPlaceResult[]
+): any[] {
+  const suggestions: any[] = [];
+
+  // Add dining suggestion if we have restaurants
+  if (restaurants.length > 0) {
+    const topRestaurants = restaurants.slice(0, 3);
+    suggestions.push({
+      type: 'dining',
+      title: 'Culinary Experiences',
+      description: `Explore ${topRestaurants.length} highly-rated restaurants including ${topRestaurants[0].name}${topRestaurants[1] ? ` and ${topRestaurants[1].name}` : ''}.`,
+      estimatedCost: topRestaurants[0].priceLevel || '$30-100 per meal',
+      duration: 'Varies',
+      data: topRestaurants,
+    });
+  }
+
+  // Add activity suggestion if we have attractions
+  if (attractions.length > 0) {
+    const topAttractions = attractions.slice(0, 3);
+    suggestions.push({
+      type: 'activity',
+      title: 'Must-See Attractions',
+      description: `Visit popular attractions including ${topAttractions[0].name}${topAttractions[1] ? ` and ${topAttractions[1].name}` : ''}.`,
+      estimatedCost: '$50-150 per person',
+      duration: '2-4 hours each',
+      data: topAttractions,
+    });
+  }
+
+  // Add accommodation suggestion if we have hotels
+  if (hotels.length > 0) {
+    const topHotels = hotels.slice(0, 3);
+    suggestions.push({
+      type: 'accommodation',
+      title: 'Recommended Hotels',
+      description: `Stay at top-rated accommodations like ${topHotels[0].name}${topHotels[1] ? ` or ${topHotels[1].name}` : ''}.`,
+      estimatedCost: topHotels[0].priceLevel || '$100-300 per night',
+      duration: 'Throughout stay',
+      data: topHotels,
+    });
+  }
+
+  return suggestions;
+}
+
+/**
+ * Generate itinerary from real SERP data
+ */
+function generateItineraryFromSerpData(
+  request: AITripRequest,
+  attractions: SerpPlaceResult[],
+  restaurants: SerpPlaceResult[]
+): any {
+  const days = request.dates
+    ? Math.ceil((new Date(request.dates.end).getTime() - new Date(request.dates.start).getTime()) / (1000 * 60 * 60 * 24))
+    : 5;
+
+  const itinerary = [];
+
+  for (let day = 1; day <= Math.min(days, 7); day++) {
+    // Distribute attractions across days
+    const dayAttractions = attractions.slice((day - 1) * 2, day * 2);
+    const morningAttraction = dayAttractions[0];
+    const afternoonAttraction = dayAttractions[1];
+
+    // Distribute restaurants across days
+    const lunchSpot = restaurants[day - 1];
+    const dinnerSpot = restaurants[day + 6] || restaurants[day] || restaurants[0];
+
+    itinerary.push({
+      day,
+      date: request.dates
+        ? new Date(new Date(request.dates.start).getTime() + (day - 1) * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        : null,
+      activities: [
+        {
+          time: '09:00',
+          title: morningAttraction?.name || `Morning Activity - Day ${day}`,
+          description: morningAttraction?.description || 'Start your day with an exciting local experience.',
+          location: morningAttraction?.address,
+          rating: morningAttraction?.rating,
+          duration: '2-3 hours',
+        },
+        {
+          time: '12:00',
+          title: lunchSpot ? `Lunch at ${lunchSpot.name}` : 'Lunch',
+          description: lunchSpot?.description || 'Recommended local restaurant with authentic cuisine.',
+          location: lunchSpot?.address,
+          rating: lunchSpot?.rating,
+          priceLevel: lunchSpot?.priceLevel,
+          duration: '1-2 hours',
+        },
+        {
+          time: '14:00',
+          title: afternoonAttraction?.name || `Afternoon Exploration - Day ${day}`,
+          description: afternoonAttraction?.description || 'Discover hidden gems and popular attractions.',
+          location: afternoonAttraction?.address,
+          rating: afternoonAttraction?.rating,
+          duration: '3-4 hours',
+        },
+        {
+          time: '19:00',
+          title: dinnerSpot ? `Dinner at ${dinnerSpot.name}` : 'Dinner & Evening',
+          description: dinnerSpot?.description || 'Enjoy dinner and optional evening entertainment.',
+          location: dinnerSpot?.address,
+          rating: dinnerSpot?.rating,
+          priceLevel: dinnerSpot?.priceLevel,
+          duration: '2-3 hours',
+        },
+      ],
+    });
+  }
+
+  return {
+    days: itinerary.length,
+    dailyPlan: itinerary,
+  };
+}
+
+/**
  * Calculate estimated budget
  */
 function calculateEstimatedBudget(request: AITripRequest): any {
@@ -336,9 +548,26 @@ export const chat = async (req: AuthRequest, res: Response): Promise<void> => {
   } catch (error: any) {
     console.error('AI chat error:', error);
 
-    // If it's a Genkit/API error, provide a fallback response
-    if (error.message?.includes('API') || error.message?.includes('genkit')) {
-      console.warn('Genkit error, falling back to mock response');
+    // Check if it's a Google AI API error (overloaded, rate limit, network issue, etc.)
+    const isGoogleAIError = 
+      error.constructor?.name === 'GoogleGenerativeAIFetchError' ||
+      error.status === 503 ||
+      error.status === 429 ||
+      error.message?.includes('GoogleGenerativeAI') ||
+      error.message?.includes('API') || 
+      error.message?.includes('genkit') ||
+      error.message?.includes('overloaded') ||
+      error.message?.includes('rate limit');
+
+    if (isGoogleAIError) {
+      const errorReason = error.status === 503 
+        ? 'The AI service is temporarily overloaded' 
+        : error.status === 429 
+          ? 'Rate limit exceeded' 
+          : 'The AI service is temporarily unavailable';
+
+      console.warn(`⚠️  ${errorReason}, falling back to mock response`);
+      
       const mockResponse = generateMockChatResponse(req.body.message || '', req.body.chatHistory, req.body.userLocation);
 
       res.status(HTTP_STATUS.OK).json({
@@ -349,6 +578,7 @@ export const chat = async (req: AuthRequest, res: Response): Promise<void> => {
             model: 'mock-fallback',
             userId: req.user?.uid || 'anonymous',
             timestamp: new Date().toISOString(),
+            fallbackReason: errorReason,
           },
         },
         message: 'Chat response generated (fallback mode)',
@@ -378,6 +608,430 @@ function parseDuration(duration: string): string {
     console.error('Error parsing duration:', error);
     return 'N/A';
   }
+}
+
+/**
+ * Get popular travel destination countries using Genkit
+ */
+export const getPopularCountries = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const apiKey = process.env.GOOGLE_AI_API_KEY;
+
+    if (!apiKey) {
+      // Fallback to hardcoded popular countries
+      const fallbackCountries = getFallbackPopularCountries();
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: {
+          countries: fallbackCountries,
+          metadata: {
+            model: 'fallback',
+            timestamp: new Date().toISOString(),
+          },
+        },
+      });
+      return;
+    }
+
+    // Use Genkit to get popular countries
+    const prompt = `List exactly 5 of the most popular international travel destination countries right now.
+    Consider factors like tourism popularity, accessibility, and variety of experiences.
+    Return ONLY a JSON array of country names, nothing else. Format: ["Country1", "Country2", "Country3", "Country4", "Country5"]
+    Use full country names (e.g., "United States" not "USA").`;
+
+    const aiResponse = await generateTravelChatResponse(prompt, [], '');
+
+    // Parse the response - it should be a JSON array
+    let countries: string[] = [];
+    try {
+      // Try to extract JSON array from the response
+      const jsonMatch = aiResponse.toString().match(/\[.*\]/s);
+      if (jsonMatch) {
+        countries = JSON.parse(jsonMatch[0]);
+        // Ensure we have exactly 5 countries
+        if (countries.length !== 5) {
+          countries = getFallbackPopularCountries();
+        }
+      } else {
+        // Fallback if parsing fails
+        countries = getFallbackPopularCountries();
+      }
+    } catch (parseError) {
+      console.error('Failed to parse AI response, using fallback:', parseError);
+      countries = getFallbackPopularCountries();
+    }
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data: {
+        countries,
+        metadata: {
+          model: 'gemini-2.5-flash',
+          timestamp: new Date().toISOString(),
+        },
+      },
+    });
+  } catch (error: any) {
+    console.error('Get popular countries error:', error);
+
+    // Fallback to hardcoded countries on error
+    const fallbackCountries = getFallbackPopularCountries();
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data: {
+        countries: fallbackCountries,
+        metadata: {
+          model: 'fallback',
+          timestamp: new Date().toISOString(),
+        },
+      },
+    });
+  }
+};
+
+/**
+ * Get popular cities for a country using Genkit
+ */
+export const getPopularCities = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { country } = req.body;
+
+    if (!country || typeof country !== 'string' || country.trim().length === 0) {
+      throw new AppError('Country is required', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    const apiKey = process.env.GOOGLE_AI_API_KEY;
+
+    if (!apiKey) {
+      // Fallback to hardcoded popular cities
+      const fallbackCities = getFallbackPopularCities(country);
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: {
+          cities: fallbackCities,
+          metadata: {
+            model: 'fallback',
+            timestamp: new Date().toISOString(),
+          },
+        },
+        message: `Found ${fallbackCities.length} popular cities`,
+      });
+      return;
+    }
+
+    // Use Genkit to get popular cities
+    const prompt = `List the top 5 most popular tourist cities in ${country}.
+    Return ONLY a JSON array of city names, nothing else. Format: ["City1", "City2", "City3", "City4", "City5"]
+    Make sure they are actual tourist destinations people would want to visit.`;
+
+    const aiResponse = await generateTravelChatResponse(prompt, [], '');
+
+    // Parse the response - it should be a JSON array
+    let cities: string[] = [];
+    try {
+      // Try to extract JSON array from the response
+      const jsonMatch = aiResponse.toString().match(/\[.*\]/s);
+      if (jsonMatch) {
+        cities = JSON.parse(jsonMatch[0]);
+      } else {
+        // Fallback if parsing fails
+        cities = getFallbackPopularCities(country);
+      }
+    } catch (parseError) {
+      console.error('Failed to parse AI response, using fallback:', parseError);
+      cities = getFallbackPopularCities(country);
+    }
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data: {
+        cities,
+        metadata: {
+          model: 'gemini-2.5-flash',
+          timestamp: new Date().toISOString(),
+        },
+      },
+      message: `Found ${cities.length} popular cities`,
+    });
+  } catch (error: any) {
+    console.error('Get popular cities error:', error);
+
+    // Fallback to hardcoded cities on error
+    const fallbackCities = getFallbackPopularCities(req.body.country || '');
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data: {
+        cities: fallbackCities,
+        metadata: {
+          model: 'fallback',
+          timestamp: new Date().toISOString(),
+        },
+      },
+      message: `Found ${fallbackCities.length} popular cities (fallback)`,
+    });
+  }
+};
+
+/**
+ * Get fallback popular countries for travel
+ */
+function getFallbackPopularCountries(): string[] {
+  return ['France', 'Italy', 'Japan', 'Spain', 'United States'];
+}
+
+/**
+ * Get fallback popular cities for common countries
+ */
+function getFallbackPopularCities(country: string): string[] {
+  const normalizedCountry = country.toLowerCase().trim();
+
+  const cityMap: Record<string, string[]> = {
+    'france': ['Paris', 'Nice', 'Lyon', 'Marseille', 'Bordeaux'],
+    'japan': ['Tokyo', 'Kyoto', 'Osaka', 'Hiroshima', 'Fukuoka'],
+    'italy': ['Rome', 'Venice', 'Florence', 'Milan', 'Naples'],
+    'spain': ['Barcelona', 'Madrid', 'Seville', 'Valencia', 'Granada'],
+    'usa': ['New York', 'Los Angeles', 'Las Vegas', 'Miami', 'San Francisco'],
+    'united states': ['New York', 'Los Angeles', 'Las Vegas', 'Miami', 'San Francisco'],
+    'uk': ['London', 'Edinburgh', 'Manchester', 'Liverpool', 'Oxford'],
+    'united kingdom': ['London', 'Edinburgh', 'Manchester', 'Liverpool', 'Oxford'],
+    'germany': ['Berlin', 'Munich', 'Hamburg', 'Frankfurt', 'Cologne'],
+    'thailand': ['Bangkok', 'Phuket', 'Chiang Mai', 'Pattaya', 'Krabi'],
+    'australia': ['Sydney', 'Melbourne', 'Brisbane', 'Perth', 'Adelaide'],
+    'canada': ['Toronto', 'Vancouver', 'Montreal', 'Quebec City', 'Calgary'],
+    'mexico': ['Mexico City', 'Cancun', 'Playa del Carmen', 'Guadalajara', 'Tulum'],
+    'brazil': ['Rio de Janeiro', 'São Paulo', 'Salvador', 'Brasília', 'Florianópolis'],
+    'greece': ['Athens', 'Santorini', 'Mykonos', 'Crete', 'Rhodes'],
+    'portugal': ['Lisbon', 'Porto', 'Faro', 'Madeira', 'Évora'],
+    'netherlands': ['Amsterdam', 'Rotterdam', 'The Hague', 'Utrecht', 'Maastricht'],
+    'switzerland': ['Zurich', 'Geneva', 'Lucerne', 'Bern', 'Interlaken'],
+    'austria': ['Vienna', 'Salzburg', 'Innsbruck', 'Graz', 'Hallstatt'],
+    'turkey': ['Istanbul', 'Antalya', 'Cappadocia', 'Izmir', 'Bodrum'],
+  };
+
+  return cityMap[normalizedCountry] || ['Capital City', 'City 1', 'City 2', 'City 3', 'City 4'];
+}
+
+/**
+ * Convert budget preference to flight cabin class
+ * Used for flight searches to match user's budget expectations
+ */
+function getBudgetCabinClass(budget?: string): 'economy' | 'premium_economy' | 'business' | 'first' {
+  if (!budget) return 'economy';
+  
+  const normalized = budget.toLowerCase().trim();
+  
+  switch (normalized) {
+    case 'budget':
+    case 'cheap':
+    case 'low':
+      return 'economy';
+    
+    case 'moderate':
+    case 'mid':
+    case 'medium':
+      return 'premium_economy';
+    
+    case 'luxury':
+    case 'high':
+    case 'premium':
+      return 'business';
+    
+    case 'first':
+    case 'first class':
+      return 'first';
+    
+    default:
+      return 'economy';
+  }
+}
+
+/**
+ * Convert city/country name to primary airport code
+ * Used for flight searches which require IATA codes
+ */
+function getAirportCode(location: string): string {
+  if (!location) return location;
+  
+  const normalized = location.toLowerCase().trim();
+  
+  // Airport code mapping for major cities and destinations
+  const airportMap: Record<string, string> = {
+    // Major US Cities
+    'new york': 'JFK',
+    'new york city': 'JFK',
+    'nyc': 'JFK',
+    'los angeles': 'LAX',
+    'la': 'LAX',
+    'chicago': 'ORD',
+    'houston': 'IAH',
+    'phoenix': 'PHX',
+    'philadelphia': 'PHL',
+    'san antonio': 'SAT',
+    'san diego': 'SAN',
+    'dallas': 'DFW',
+    'san jose, ca': 'SJC',
+    'austin': 'AUS',
+    'jacksonville': 'JAX',
+    'fort worth': 'DFW',
+    'san francisco': 'SFO',
+    'seattle': 'SEA',
+    'denver': 'DEN',
+    'washington': 'DCA',
+    'washington dc': 'DCA',
+    'boston': 'BOS',
+    'atlanta': 'ATL',
+    'miami': 'MIA',
+    'las vegas': 'LAS',
+    'orlando': 'MCO',
+    
+    // Europe
+    'london': 'LHR',
+    'paris': 'CDG',
+    'france': 'CDG',
+    'rome': 'FCO',
+    'italy': 'FCO',
+    'madrid': 'MAD',
+    'spain': 'MAD',
+    'barcelona': 'BCN',
+    'berlin': 'BER',
+    'germany': 'FRA',
+    'frankfurt': 'FRA',
+    'munich': 'MUC',
+    'amsterdam': 'AMS',
+    'netherlands': 'AMS',
+    'zurich': 'ZRH',
+    'switzerland': 'ZRH',
+    'vienna': 'VIE',
+    'austria': 'VIE',
+    'brussels': 'BRU',
+    'belgium': 'BRU',
+    'dublin': 'DUB',
+    'ireland': 'DUB',
+    'lisbon': 'LIS',
+    'portugal': 'LIS',
+    'copenhagen': 'CPH',
+    'denmark': 'CPH',
+    'stockholm': 'ARN',
+    'sweden': 'ARN',
+    'oslo': 'OSL',
+    'norway': 'OSL',
+    'athens': 'ATH',
+    'greece': 'ATH',
+    'istanbul': 'IST',
+    'turkey': 'IST',
+    'moscow': 'SVO',
+    'russia': 'SVO',
+    'prague': 'PRG',
+    'czech republic': 'PRG',
+    'warsaw': 'WAW',
+    'poland': 'WAW',
+    'budapest': 'BUD',
+    'hungary': 'BUD',
+    
+    // Asia
+    'tokyo': 'NRT',
+    'japan': 'NRT',
+    'beijing': 'PEK',
+    'china': 'PEK',
+    'shanghai': 'PVG',
+    'hong kong': 'HKG',
+    'singapore': 'SIN',
+    'dubai': 'DXB',
+    'uae': 'DXB',
+    'united arab emirates': 'DXB',
+    'bangkok': 'BKK',
+    'thailand': 'BKK',
+    'kuala lumpur': 'KUL',
+    'malaysia': 'KUL',
+    'seoul': 'ICN',
+    'south korea': 'ICN',
+    'taipei': 'TPE',
+    'taiwan': 'TPE',
+    'manila': 'MNL',
+    'philippines': 'MNL',
+    'jakarta': 'CGK',
+    'indonesia': 'CGK',
+    'delhi': 'DEL',
+    'india': 'DEL',
+    'mumbai': 'BOM',
+    
+    // Middle East
+    'abu dhabi': 'AUH',
+    'doha': 'DOH',
+    'qatar': 'DOH',
+    'riyadh': 'RUH',
+    'saudi arabia': 'RUH',
+    'tel aviv': 'TLV',
+    'israel': 'TLV',
+    'cairo': 'CAI',
+    'egypt': 'CAI',
+    
+    // South America
+    'buenos aires': 'EZE',
+    'argentina': 'EZE',
+    'são paulo': 'GRU',
+    'sao paulo': 'GRU',
+    'brazil': 'GRU',
+    'rio de janeiro': 'GIG',
+    'lima': 'LIM',
+    'peru': 'LIM',
+    'bogota': 'BOG',
+    'colombia': 'BOG',
+    'santiago': 'SCL',
+    'chile': 'SCL',
+    
+    // Oceania
+    'sydney': 'SYD',
+    'australia': 'SYD',
+    'melbourne': 'MEL',
+    'brisbane': 'BNE',
+    'perth': 'PER',
+    'auckland': 'AKL',
+    'new zealand': 'AKL',
+    
+    // Africa
+    'johannesburg': 'JNB',
+    'south africa': 'JNB',
+    'cape town': 'CPT',
+    'nairobi': 'NBO',
+    'kenya': 'NBO',
+    'lagos': 'LOS',
+    'nigeria': 'LOS',
+    'casablanca': 'CMN',
+    'morocco': 'CMN',
+    
+    // Canada
+    'toronto': 'YYZ',
+    'canada': 'YYZ',
+    'vancouver': 'YVR',
+    'montreal': 'YUL',
+    'calgary': 'YYC',
+    
+    // Mexico & Central America
+    'mexico city': 'MEX',
+    'mexico': 'MEX',
+    'cancun': 'CUN',
+    'guadalajara': 'GDL',
+    'monterrey': 'MTY',
+    'san jose': 'SJO',
+    'costa rica': 'SJO',
+    'panama city': 'PTY',
+    'panama': 'PTY',
+  };
+  
+  // Check if it's already an airport code (3 letters, uppercase)
+  if (/^[A-Z]{3}$/.test(location)) {
+    return location;
+  }
+  
+  // Try to find airport code from mapping
+  const airportCode = airportMap[normalized];
+  if (airportCode) {
+    return airportCode;
+  }
+  
+  // If not found in mapping, return the original (might be an airport code or small city)
+  return location.toUpperCase();
 }
 
 /**

@@ -138,6 +138,7 @@ export interface AITripRequest {
   };
   budget?: string;
   travelers?: number;
+  interests?: string[]; // User interests for attraction search
   preferences?: {
     activities?: string[];
     accommodationType?: string;

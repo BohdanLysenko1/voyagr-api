@@ -1,15 +1,20 @@
+// Load environment variables FIRST, before any other imports
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express, { Application } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
-import dotenv from 'dotenv';
+import swaggerUi from 'swagger-ui-express';
 import { initializeFirebase } from './config/firebase';
+import { swaggerSpec } from './config/swagger';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
-// Load environment variables
-dotenv.config();
+// Debug: Log SERP API key status
+console.log('🔑 SERP API Key Status:', process.env.SERPAPI_API_KEY ? `Configured (${process.env.SERPAPI_API_KEY.substring(0, 10)}...)` : '❌ NOT FOUND');
 
 // Initialize Express app
 const app: Application = express();
@@ -86,13 +91,43 @@ if (NODE_ENV === 'development') {
 /**
  * API Routes
  */
-// Root endpoint
+/**
+ * @swagger
+ * /:
+ *   get:
+ *     summary: Root endpoint
+ *     tags: [Health]
+ *     description: Welcome message and API information
+ *     responses:
+ *       200:
+ *         description: API information
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Welcome to Voyagr API
+ *                 version:
+ *                   type: string
+ *                   example: 1.0.0
+ *                 documentation:
+ *                   type: string
+ *                   example: /api-docs
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ */
 app.get('/', (_req, res) => {
   res.json({
     success: true,
     message: 'Welcome to Voyagr API',
     version: '1.0.0',
-    documentation: '/api/health',
+    documentation: '/api-docs',
     timestamp: new Date().toISOString(),
   });
 });
@@ -103,6 +138,26 @@ app.use('/api', routes);
 // Legacy routes (for backward compatibility)
 app.use('/deals', routes);
 app.use('/ai', routes);
+
+/**
+ * Swagger API Documentation
+ */
+// Swagger UI
+app.use(
+  '/api-docs',
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, {
+    explorer: true,
+    customCss: '.swagger-ui .topbar { display: none }',
+    customSiteTitle: 'Voyagr API Documentation',
+  })
+);
+
+// Swagger JSON spec
+app.get('/api-docs.json', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
 
 /**
  * Error Handling
@@ -124,6 +179,7 @@ const server = app.listen(PORT, () => {
   console.log(`🚀 CORS Origin: ${WEB_ORIGIN}`);
   console.log(`🚀 API Base URL: http://localhost:${PORT}/api`);
   console.log(`🚀 Health Check: http://localhost:${PORT}/api/health`);
+  console.log(`📚 API Docs: http://localhost:${PORT}/api-docs`);
   console.log('🚀 ========================================');
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log('🚀 Press CTRL+C to stop');
